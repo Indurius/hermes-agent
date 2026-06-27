@@ -4287,6 +4287,10 @@ def cmd_security(args):
         # Default subcommand is `audit` when no subcmd is given.
         code = cmd_security_audit(args)
         sys.exit(int(code or 0))
+    if sub == "review":
+        from hermes_cli.security_review_cli import security_review_command
+
+        sys.exit(int(security_review_command(args) or 0))
     print(f"unknown security subcommand: {sub}", file=sys.stderr)
     sys.exit(2)
 

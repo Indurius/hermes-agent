@@ -366,6 +366,27 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                           help="Initial card status. Use 'blocked' for cards "
                                "that require immediate human ops (R3 gate) "
                                "to skip the brief running-to-blocked transition.")
+    p_create.add_argument("--external-source-kind",
+                          choices=[
+                              "trusted_local",
+                              "user_supplied_file",
+                              "public_web",
+                              "private_web",
+                              "external_repo",
+                              "reviewed_bundle_safe",
+                              "reviewed_bundle_suspicious",
+                              "blocked_or_unknown",
+                          ],
+                          default=None,
+                          help="Mark this create request as derived from external/untrusted content and run the untrusted-content gate")
+    p_create.add_argument("--external-bundle", default=None,
+                          help="Sanitized quarantine/review bundle id for externally sourced content")
+    p_create.add_argument("--external-reviewed-risk",
+                          choices=["safe", "suspicious", "blocked", "needs-human", "reviewer_failed"],
+                          default=None,
+                          help="Brokered review result for the external source, if already reviewed")
+    p_create.add_argument("--gate-dry-run", action="store_true",
+                          help="Evaluate the external-content gate in dry-run mode: warn/sanitize instead of requiring review where safe")
     p_create.add_argument("--json", action="store_true", help="Emit JSON output")
 
     # --- swarm ---
@@ -1302,7 +1323,82 @@ def _cmd_assignees(args: argparse.Namespace) -> int:
     return 0
 
 
+def _apply_external_content_gate_to_create(args: argparse.Namespace) -> int | None:
+    """Sanitize/gate explicit externally sourced Kanban task creation.
+
+    Returns a shell exit code when creation must stop, otherwise mutates the
+    argparse namespace so downstream ``kb.create_task`` only receives safe
+    durable title/body fields.
+    """
+    source_kind = getattr(args, "external_source_kind", None)
+    if not source_kind:
+        return None
+    from hermes_cli.untrusted_content_gate import ContentProvenance, TargetAction, gate_transition
+
+    raw_title = str(getattr(args, "title", "") or "")
+    raw_body = str(getattr(args, "body", "") or "")
+    raw_sources = tuple(v for v in (raw_title, raw_body) if v)
+    provenance = ContentProvenance(
+        source_kind=source_kind,
+        origin_label=getattr(args, "external_bundle", None) or source_kind,
+        quarantine_bundle_id=getattr(args, "external_bundle", None),
+        review_result=getattr(args, "external_reviewed_risk", None),
+        sanitized_ref=getattr(args, "external_bundle", None),
+    )
+    decision = gate_transition(
+        "\n".join(v for v in (raw_title, raw_body) if v),
+        provenance,
+        TargetAction.TASK_CREATE,
+        dry_run=bool(getattr(args, "gate_dry_run", False)),
+        raw_sources=raw_sources,
+    )
+    if decision.level in {"block", "needs-human"}:
+        print(
+            f"kanban: untrusted-content gate refused external task creation: {decision.level} ({decision.reason})",
+            file=sys.stderr,
+        )
+        return 2
+    if decision.level == "review":
+        print(
+            "kanban: external task creation requires brokered security review; "
+            "use `hermes security review kanban ...` or pass reviewed bundle metadata",
+            file=sys.stderr,
+        )
+        return 2
+
+    from hermes_cli.untrusted_content_gate import sanitize_untrusted_text
+    from hermes_cli.security_review_gate import assert_durable_kanban_safe, dumps_durable_json
+
+    safe_title = sanitize_untrusted_text(raw_title or "External content task", raw_sources=raw_sources, max_len=120)
+    safe_body = sanitize_untrusted_text(raw_body, raw_sources=raw_sources) if raw_body else ""
+    gate_payload = {
+        "untrusted_content_gate": {
+            "policy_version": decision.risk_metadata.get("policy_version"),
+            "level": decision.level,
+            "reason": decision.reason,
+            "source_kind": decision.source_kind,
+            "target_action": decision.target_action,
+            "bundle_id": decision.risk_metadata.get("bundle_id"),
+            "review_result": decision.risk_metadata.get("review_result"),
+        }
+    }
+    durable_sources = raw_sources + tuple(
+        str(v)
+        for v in (getattr(args, "external_bundle", None), decision.risk_metadata.get("bundle_id"))
+        if v and len(str(v)) > 20
+    )
+    gate_block = dumps_durable_json(gate_payload, raw_sources=durable_sources)
+    args.title = safe_title or "External content task"
+    args.body = (safe_body + "\n\n" if safe_body else "") + gate_block
+    assert_durable_kanban_safe(args.title, raw_sources=durable_sources)
+    assert_durable_kanban_safe(args.body, raw_sources=durable_sources)
+    return None
+
+
 def _cmd_create(args: argparse.Namespace) -> int:
+    gate_exit = _apply_external_content_gate_to_create(args)
+    if gate_exit is not None:
+        return gate_exit
     try:
         ws_kind, ws_path = _parse_workspace_flag(args.workspace)
         branch_name = _parse_branch_flag(getattr(args, "branch", None))
