@@ -1,12 +1,18 @@
 import type { ConnectionRequestPayload, ConnectionUpdatePayload, GatewayEvent } from '@hermes/shared'
 
 import { applyAccountConnectionUpdate } from '@/app/capabilities/connectors/data/account-operations'
+import { abortPreviewTyping } from '@/app/chat/right-rail/preview-typing-abort'
 import { pendingClarifyToolPayload } from '@/app/session/hooks/use-session-actions/restore-pending-clarify'
 import { connectionRequestToolPayload } from '@/app/session/hooks/use-session-actions/restore-pending-connection'
 import { translateNow } from '@/i18n'
 import { settlePendingClarifyToolCall, textPart } from '@/lib/chat-messages'
 import { $clarifyRequests, clearClarifyRequest } from '@/store/clarify'
-import { normalizeConnectionRequest, setConnectionRequest, updateConnectionRequest } from '@/store/connection-request'
+import {
+  type ConnectionRequest,
+  normalizeConnectionRequest,
+  setConnectionRequest,
+  updateConnectionRequest
+} from '@/store/connection-request'
 import { dispatchNativeNotification } from '@/store/native-notifications'
 import { notify } from '@/store/notifications'
 import {
@@ -40,6 +46,10 @@ const isConnectionRequestEvent = (event: GatewayEvent): event is ConnectionReque
 const isConnectionUpdateEvent = (event: GatewayEvent): event is ConnectionUpdateEvent =>
   event.type === 'connection.update' && event.payload !== undefined
 
+// A display card has no targets to name.
+const connectionRequestNoticeBody = (request: ConnectionRequest): string =>
+  request.targets.map(target => target.name).join(', ') || translateNow('connectors.title')
+
 /** The blocking-input family arrives as server→client REQUESTS (see
  *  `server-requests.ts`); the one EVENT in the family is `request.cancel`, the
  *  backend withdrawing an open request (timeout / interrupt / session close):
@@ -50,6 +60,13 @@ export function handleInputRequestEvent(ctx: GatewayEventContext): boolean {
   const { deps, event, payload, sessionId, occurredAt } = ctx
 
   if (isConnectionRequestEvent(event)) {
+    // An interrupted/deleted session's runtime has no turn left to consent to a
+    // connection; the backend withdraws its request on the same boundary. Drop
+    // the frame rather than parking a stale consent card (#75587).
+    if (sessionId && deps.sessionInterrupted(sessionId)) {
+      return true
+    }
+
     // Park per-session and upsert a stable tool row so the card renders even if tool.start was missed.
     const request = normalizeConnectionRequest(event.payload, sessionId ?? null)
 
@@ -62,7 +79,7 @@ export function handleInputRequestEvent(ctx: GatewayEventContext): boolean {
       }
 
       dispatchNativeNotification({
-        body: request.targets.map(target => target.name).join(', '),
+        body: connectionRequestNoticeBody(request),
         kind: 'input',
         sessionId,
         title: translateNow('notifications.native.inputTitle')
@@ -97,6 +114,10 @@ export function handleInputRequestEvent(ctx: GatewayEventContext): boolean {
   if (!id) {
     return true
   }
+
+  // preview.act has no card. A timeout or interrupt still has to stop keystrokes
+  // already queued for that type.
+  abortPreviewTyping(id, typeof payload?.reason === 'string' ? payload.reason : 'interrupted')
 
   forgetServerRequest(id)
 

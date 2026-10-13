@@ -5,7 +5,6 @@ import asyncio
 import json
 import logging
 import os
-from typing import List
 from gateway.platforms.event import MessageEvent
 from gateway.session import SessionSource
 
@@ -65,7 +64,7 @@ class GatewayInboundEnrichMixin:
                 await self._echo_stt_transcripts(_echo_adapter, source, _successful_transcripts, metadata=_echo_meta)
         return message_text
 
-    async def _enrich_message_with_vision(self, user_text: str, image_paths: List[str]) -> str:
+    async def _enrich_message_with_vision(self, user_text: str, image_paths: list[str]) -> str:
         """Auto-analyze user-attached images with the vision tool and prepend the descriptions.
         Description *and* local cache path are injected so the model understands the image without
         a tool call and can re-examine it with vision_analyze."""
@@ -111,8 +110,8 @@ class GatewayInboundEnrichMixin:
         return f"{prefix}\n\n{user_text}" if user_text else prefix
 
     async def _enrich_message_with_transcription(
-        self, user_text: str, audio_paths: List[str]
-    ) -> tuple[str, List[str]]:
+        self, user_text: str, audio_paths: list[str]
+    ) -> tuple[str, list[str]]:
         """Transcribe voice clips with the configured STT provider and prepend the transcripts →
         ``(enriched_text, successful_transcripts)``; the transcripts (input order; empty if every clip
         failed or STT is disabled) let callers echo them back before the agent loop."""
@@ -136,7 +135,7 @@ class GatewayInboundEnrichMixin:
             return self._prepend_media_prefix("[voice message could not be transcribed]", user_text), []
 
         enriched_parts = []
-        successful_transcripts: List[str] = []
+        successful_transcripts: list[str] = []
         for path in audio_paths:
             try:
                 logger.debug("Transcribing user voice: %s", path)
