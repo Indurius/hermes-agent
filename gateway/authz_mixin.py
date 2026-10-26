@@ -410,9 +410,18 @@ class GatewayAuthorizationMixin:
         adapter = self._authorization_adapter(platform, profile)
         return adapter is not None and bool(getattr(adapter, name, False))
 
-    def _config_extra(self, platform) -> dict:
-        """``config.platforms[platform].extra`` as a dict ({} when absent)."""
-        platforms = getattr(getattr(self, "config", None), "platforms", None)
+    def _authorization_config(self, profile: Optional[str] = None):
+        """Receiving bot's config; None names the launch bot, never an ambient runtime.
+
+        A missing secondary config must not borrow the launch bot's policy.
+        """
+        if profile is None:
+            return getattr(self, "config", None)
+        return (getattr(self, "_profile_configs", None) or {}).get(profile)
+
+    def _config_extra(self, platform, *, profile: Optional[str] = None) -> dict:
+        """Receiving config's ``platforms[platform].extra`` ({} when absent)."""
+        platforms = getattr(self._authorization_config(profile), "platforms", None)
         extra = getattr(platforms.get(platform), "extra", None) if platforms is not None else None
         return extra if isinstance(extra, dict) else {}
 
@@ -422,7 +431,7 @@ class GatewayAuthorizationMixin:
         adapter = self._authorization_adapter(platform, profile)
         value = getattr(adapter, attr, None) if adapter is not None else None
         if value is None:
-            value = self._config_extra(platform).get(extra_key)
+            value = self._config_extra(platform, profile=profile).get(extra_key)
         return value
 
     def _adapter_policy(self, platform, kind: str, profile) -> str:
@@ -638,9 +647,13 @@ class GatewayAuthorizationMixin:
         """Whether a user may use the bot.
 
         Order: trusted-upstream delegation, chat-scoped group allowlists, ``{PLATFORM}_ALLOW_BOTS``,
-        per-platform allow-all, adapter role auth, pairing store, env/config allowlists,
-        ``GATEWAY_ALLOW_ALL_USERS``, default deny. A bot-authored message that any of these admits
-        is still refused while its chat's loop guard is cooling down.
+        per-platform allow-all, adapter role auth, explicit Signal group-only DM denial,
+        pairing store, env/config allowlists, ``GATEWAY_ALLOW_ALL_USERS``, default deny.
+        The Signal gate overrides pairing and both ``GATEWAY_ALLOWED_USERS`` and
+        ``GATEWAY_ALLOW_ALL_USERS``: a platform-specific DM opt-out is narrower than
+        global grants. Per-platform allow-all and adapter role auth still win above it.
+        A bot-authored message that any of these admits is still refused while its
+        chat's loop guard is cooling down.
         """
         if not self._principal_authorized(source, allow_adapter_delegation=allow_adapter_delegation):
             return False
@@ -739,24 +752,26 @@ class GatewayAuthorizationMixin:
     def _get_unauthorized_dm_behavior(self, platform: Optional[Platform], *, profile: Optional[str] = None) -> str:
         """How unauthorized DMs are handled ("pair" / "ignore" / "decline") for a platform.
 
-        Order: explicit per-platform config; Email → "ignore" (inboxes hold arbitrary mail); explicit
-        non-default global; adapter dm_policy (pairing → "pair", allowlist/disabled → "ignore"); any
-        configured allowlist → "ignore" (spamming unknown contacts with codes is noisy and leaks); else "pair".
+        Order: explicit Signal group-only DM denial → "ignore"; missing receiving
+        config → "ignore"; explicit per-platform config; Email → "ignore" (inboxes
+        hold arbitrary mail); explicit non-default global; adapter dm_policy
+        (pairing → "pair", allowlist/disabled → "ignore"); configured allowlist
+        → "ignore" (unsolicited codes are noisy and leak); else "pair".
 
-        1. 2. Email defaults to ``"ignore"`` unless explicitly opted into pairing. 3. Explicit global
-        ``unauthorized_dm_behavior`` in config — wins for chat-shaped platforms when no per-platform
-        override is set. 4. When an adapter-level DM policy opts into pairing or silent drop, honor it. 5.
-        When an allowlist (``PLATFORM_ALLOWED_USERS``, ``PLATFORM_GROUP_ALLOWED_USERS`` /
-        ``PLATFORM_GROUP_ALLOWED_CHATS``, or ``GATEWAY_ALLOWED_USERS``) is configured, default to
-        ``"ignore"`` — the allowlist signals that the owner has deliberately restricted access; spamming
-        unknown contacts with pairing codes is both noisy and a potential info-leak. (#9337) 6.
+        All config rungs belong to the receiving bot, not the launch or routed runtime.
+        The Signal opt-out precedes every disposition rung: a denied DM must not mint
+        pairing state even when config explicitly requests pairing. Admission's
+        per-platform allow-all and adapter role grants run before that denial;
+        global grants run after it and cannot override the platform-specific opt-out.
         """
         if platform == Platform.SIGNAL and self._signal_group_only():
             return "ignore"
-        config = getattr(self, "config", None)
+        config = self._authorization_config(profile)
+        if profile is not None and config is None:
+            return "ignore"
         if (
             config and hasattr(config, "get_unauthorized_dm_behavior") and platform
-            and "unauthorized_dm_behavior" in self._config_extra(platform)
+            and "unauthorized_dm_behavior" in self._config_extra(platform, profile=profile)
         ):
             return config.get_unauthorized_dm_behavior(platform)
         if platform == Platform.EMAIL:
@@ -768,7 +783,7 @@ class GatewayAuthorizationMixin:
         if platform:
             dm_policy = self._adapter_policy(platform, "dm", profile)
             if not dm_policy:
-                dm_policy = str(self._config_extra(platform).get("dm_policy") or "").strip().lower()
+                dm_policy = str(self._config_extra(platform, profile=profile).get("dm_policy") or "").strip().lower()
             if dm_policy == "pairing":
                 return "pair"
             if dm_policy in {"allowlist", "disabled"}:

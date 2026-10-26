@@ -83,17 +83,25 @@ def test_group_only_scope_a_b_a_does_not_leak(monkeypatch, tmp_path):
             reset_secret_scope(token)
 
 
-@pytest.mark.parametrize("grant", ["platform-allow-all", "adapter-role"])
-def test_explicit_grants_keep_their_existing_precedence(monkeypatch, grant):
+@pytest.mark.parametrize("grant,expected", [
+    ("none", False), ("platform-allow-all", True), ("adapter-role", True),
+    ("global-allow-all", False), ("global-allowlist", False),
+])
+def test_explicit_grants_keep_their_existing_precedence(monkeypatch, grant, expected):
     monkeypatch.setenv("SIGNAL_ALLOWED_USERS", "")
     monkeypatch.setenv("SIGNAL_GROUP_ALLOWED_USERS", "abc")
     host = runner()
     event_source = source("dm", "alice")
     if grant == "platform-allow-all":
         monkeypatch.setenv("SIGNAL_ALLOW_ALL_USERS", "true")
-    else:
+    elif grant == "adapter-role":
         event_source.role_authorized = True
-    assert host._is_user_authorized(event_source) is True
+    elif grant == "global-allow-all":
+        monkeypatch.setenv("GATEWAY_ALLOW_ALL_USERS", "true")
+    elif grant == "global-allowlist":
+        monkeypatch.setenv("GATEWAY_ALLOWED_USERS", "alice")
+    # Explicit platform-level DM opt-out wins over both global grants.
+    assert host._is_user_authorized(event_source) is expected
 
 
 @pytest.mark.parametrize("settings", [{}, {"SIGNAL_GROUP_ALLOWED_USERS": "abc"}])

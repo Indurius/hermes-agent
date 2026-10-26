@@ -118,7 +118,7 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
         adapter = self._delivery_adapter_for(source)
         if not adapter:
             return
-        config = getattr(self, "config", None)
+        config = self._authorization_config(self._adapter_profile_for_source(source))
         text = str(getattr(config, "unauthorized_dm_decline_message", "") or "").strip()
         try:
             await adapter.send(source.chat_id, text or DEFAULT_UNAUTHORIZED_DM_DECLINE_MESSAGE)
